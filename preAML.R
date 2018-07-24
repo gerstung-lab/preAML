@@ -1,12 +1,15 @@
 #' ---
-#' title: Prediction of AML in healthy individuals
+#' title: Discriminating evolution of acute myeloid leukaemia from age-related clonal haematopoiesis
 #' output:
 #'   html_document:
 #'     toc: true
 #'     toc_depth: 4
+#'     df_print: paged
 #'     number_sections: true
+#'     fontsize: 8pt
+#'     geometry: margin=2.5in
 #' author: Grace Collord & Moritz Gerstung 
-#' ---
+#' --- 
  
 #+ Preliminaries, echo=FALSE
 library(knitr)
@@ -21,14 +24,20 @@ my_png <-  function(file, width, height, pointsize=12, ...) {
 }
 
 
-#' # Prelim
+#' # Preliminaries
 #' ## Libraries
 library(CoxHD)
 library(survAUC)
 library(survivalROC)
+library(glmnet)
+library(RColorBrewer)
+library(stringr)
+library(dplyr)
+library(readr)
+
 set1 <- RColorBrewer::brewer.pal(8, "Set1")
 
-#' Some functions
+#' Helper functions
 superSet <- function(x, s, fill=NA){
 	i <- intersect(colnames(x), s)
 	n <- setdiff(s, colnames(x))
@@ -43,9 +52,13 @@ superSet <- function(x, s, fill=NA){
 #' The expected incidence of AML was calculated from the UK office of national statistics, 
 #' available at http://www.cancerresearchuk.org/health-professional/cancer-statistics/statistics-by-cancer-type/leukaemia-aml/incidence. 
 #' Spline function to interpolate
+#' Male denoted by 1 and female by 0
 age_incidence <- read.table("aml_age_incidence.txt", header=TRUE, sep="\t")
+head(age_incidence)
+tail(age_incidence)
+str(age_incidence)
 aml_inc <- function(gender, x){
-	if(gender==0)
+	if(gender==1)
 		splinefun(x=c(seq(0,90,5)), y=c(cumsum(age_incidence$Male.Rates/100000)*5), method="mono")(x)
 	else
 		splinefun(x=c(seq(0,90,5)), y=c(cumsum(age_incidence$Female.Rates/100000)*5), method="mono")(x)
@@ -53,8 +66,9 @@ aml_inc <- function(gender, x){
 
 #' All cause mortality from the office of national statistics (https://www.ons.gov.uk/).
 all_cause_mortality <- read.table("all_cause_mortality.txt", sep="\t", skip=1, header=TRUE)
+head(all_cause_mortality)
 all_surv <- function(gender, age1, age2){
-	if(gender==0)
+	if(gender==1)
 		s <- all_cause_mortality$lx
 	else 
 		s <- all_cause_mortality$lx.1
@@ -65,22 +79,13 @@ all_surv <- function(gender, age1, age2){
 #' Function combining both
 aml_inc_cr <- Vectorize(function(gender, age1, age2) sum(diff(aml_inc(gender, seq(age1,age2,1) ))*all_surv(gender, age1, seq(age1,age2-1,1)) ), c("gender","age1","age2"))
 
-
 #' # Discovery cohort 
 #' ## Data
-#' 4 (of 95) cases were sampled within 6 months of AML diagnosis excluded to avoid skewing model towards significance
+#' 4 (of 95) cases that were sampled within 6 months of AML diagnosis are excluded to avoid skewing model towards significance
 f = "./arch_data/DC_vaf_matrix_414ctrl_91aml.csv"
 torontoData <- read.csv(f)
-
-torontoData$gender <- ifelse(torontoData$Sex == "male", 1, 
-		ifelse(torontoData$Sex == "female", 0, torontoData$Sex))
-table(torontoData$gender)
-
+torontoData$gender <- ifelse(torontoData$Sex == "male", 1, 0)  
 torontoData$gender <- as.numeric(torontoData$gender)
-
-names(torontoData)[names(torontoData) == "Age"] <- "age"
-names(torontoData)[names(torontoData) == "Gender"] <- "gender"
-names(torontoData)[names(torontoData) == "mts_per_samp"] <- "ONC.MT"
 colnames(torontoData)
 
 #' Manually standardize
@@ -97,19 +102,21 @@ torontoX <- torontoX[,colSums(torontoX != 0)>=thr]
 
 torontoGroups <- factor(names(torontoX) %in% c("age","gender")+1, level=1:2, labels=c("Genes","Demographics"))
 
-torontoX$age <- torontoX$age/10 #only for clinical columns
+torontoX$age <- torontoX$age/10 
 names(torontoX)[which(names(torontoX)=="age")] <- "age_10"
 g <- torontoGroups == "Genes"
 torontoX[,g] <- torontoX[,g]*10
 names(torontoX)[g] <- paste(names(torontoX)[g], "0.1",sep="_")
 
-torontoSurv <- Surv(torontoData$fu_years, torontoData$Diagnosis=="AML")
+torontoSurv <- Surv(time = torontoData$fu_years, event = torontoData$Diagnosis=="AML")
 plot(survfit(torontoSurv~ 1))
 
 #' # Validation cohort
 #' ##Data
 f = "./arch_data/VC_vaf_matrix_no_duplicates_262ctrl_29aml.csv"
 sangerData <- read.csv(f)
+colnames(sangerData)
+head(sangerData[, c("Sample", "gender")]) #male=1, female=0
 #' NB all dates are jittered 
 sangerData$hcdate <- as.Date(sangerData$hcdate)
 sangerData$dodx <- as.Date(sangerData$dodx)
@@ -149,7 +156,7 @@ bar <- do.call("rbind",lapply(foo, function(x){
 					return(data.frame(Diagnosis=y[,"Diagnosis"], start=start, end=end))
 				}))
 
-bar[1:10, ]
+bar[1:6, ]
 sangerPatientsSplit <- unlist(sapply(names(foo), function(n) rep(n, nrow(foo[[n]]))))
 
 sangerSurv <- Surv(time = bar$start, time2 = bar$end, event = bar$Diagnosis!="Control", origin = 0)
@@ -157,8 +164,10 @@ plot(survfit(sangerSurv ~ 1), ylab="AML-free fraction", xlab="Time [yr]")
 
 #' # Expected AML incidence
 #' ##Validation cohort 
+
 w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))
-sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) # Unique individuals
+head(sangerSurv[w,])
+sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) 
 
 expected_rate_sanger_cr <- mean(aml_inc_cr(sangerX[w,"gender"],sangerX[w,"age_10"]*10, sangerX[w,"age_10"]*10+ pmax(1,sangerSurv2[,1]))[!sangerSurv2[,2]])
 
@@ -171,7 +180,6 @@ expected_rate_toronto_cr <- mean(aml_inc_cr(torontoX[,"gender"],torontoX[,"age_1
 n_total_toronto <- sum(torontoSurv[,2])/expected_rate_toronto_cr
 n_total_toronto
 
-
 #' # Combined data
 #' Survival
 allSurv <- rbind(sangerSurv, Surv(rep(0, nrow(torontoSurv)), torontoSurv[,1], torontoSurv[,2]))
@@ -181,6 +189,7 @@ allSurv <- Surv(allSurv[,1], allSurv[,2], allSurv[,3])
 cohort <- c(rep("Sanger", nrow(sangerX)), rep("Toronto", nrow(torontoX)))
 i <- c(sort(setdiff(gene_vars,"CALR")),"age","gender")
 allX <- rbind(superSet(sangerData,i,fill=0), superSet(torontoData,i,fill=0))
+colnames(allX)
 allX <- allX[,colSums(allX>0)>=thr]
 allX <- cbind(allX, cohort=cohort=="Sanger") + 0
 allGroups <- factor(grepl("^[A-Z]",colnames(allX))+0, levels=1:0, labels=c("Genes","Demographics"))
@@ -198,19 +207,71 @@ weights[cohort=="Toronto" & control] <- n_total_toronto/sum(cohort=="Toronto" & 
 n_total <- n_total_sanger + n_total_toronto
 n_total
 
+#'Kaplan-Meier analysis
+
+X = allX 
+surv = allSurv
+pal1 <- c("#C32B4A", "#3F76B4", "#57B2AB", "#5E4FA2", "#EB6046")
+
+colnames(X)
+names(X) <- str_replace(names(X), "[_]{1}[0-9]{1,}[\\.]{0,1}[0-9]{0,2}", "")
+X$no_drivers <- rowSums((X[, colnames(X) %in% gene_vars]>0))
+summary(X$no_drivers)
+X$max_vaf <- apply(X[, intersect(gene_vars, colnames(X))], 1, max, na.rm = TRUE)
+
+genes <- c("DNMT3A", "TET2", "TP53", "U2AF1")
+
+n_drivers <- cut(X$no_drivers, c( -1, 0, 1,  max(X$no_drivers)))
+levels(n_drivers) <- c(0,1,"2+")
+
+mvaf <- cut(X$max_vaf*10, c( -1, 0, 4, 8, max(X$max_vaf*10)))  #multiply by 10 to reverse VAF standardisation
+levels(mvaf) <- c("0", "0 - 4", "4 - 8", "8+")
+
+par(mfrow=c(2,4), mar = c(1.8, 1.9, 1.7, 0.1) + 0.1, mgp=c(2.2,0.4,0), bty="L", xpd=TRUE, las=1, tcl=-0.15, cex.axis=1, cex.lab = 1)
+for (i in 1:length(genes)) {
+  #i <- 1
+  gene <- genes[i]
+  plot(survfit(surv ~ X[[gene]] == 0), col= pal1, bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, conf.int = F)
+  mtext(gene, font=3, side = 3, line = 0.1, cex = 0.7)
+  legend("bottomleft", col=pal1[1:2], lty=1, c("MT","WT"), lwd = 1.1, bty="n", ncol = 1, cex = 0.9)
+}
+plot(survfit(surv ~ n_drivers), col=rev(pal1[1:3]), conf.int = F, mark.time = T, bty='L', yaxs='i', ylim=c(0,1.01))
+mtext("Number of drivers", font=1, side = 3, line = 0.4, cex = 0.7)
+legend("bottomleft", legend = levels(n_drivers), col= rev(pal1[1:3]), lty=1, lwd = 1.1, bty='n', title="", cex = 0.9)
+plot(survfit(surv ~ mvaf), col= rev(pal1[1:4]), conf.int = F, mark.time = T, bty='L', yaxs='i', ylim=c(0,1.01))
+mtext("Maximum VAF (%)", font=1, side = 3, line = 0.4, cex = 0.7)
+legend("bottomleft", levels(mvaf), col=rev(pal1[1:4]), lty=1, lwd = 1.1, bty='n', title="", cex = 0.9)
+
+genes <- intersect(colnames(X), gene_vars)
+length(genes)
+
+png("./figures/CombinedCohorts.KM.curves.png", width = 35, height = 20, units = "cm", res = 300)
+par(mfrow=c(4,7), mar = c(3.7, 3.5, 1.6, 1) + 0.1, mgp=c(1.9,0.4,0), bty="L", xpd=TRUE, las=1, tcl=-0.2, cex.axis=1, cex.lab = 1.2)
+for (i in 1:length(genes)) {
+  #i <- 1
+  gene <- genes[i]
+  plot(survfit(surv ~ X[[gene]] == 0), col= pal1, xlab='Time (years)', ylab = 'AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, conf.int = F)
+  mtext(gene, font=4, side = 3, cex = 0.9, line = 0.35)
+}
+plot.new(); par(xpd=NA)
+legend(x = -0.5, y = 0.5, col=pal1[1:2], lty=1, c("Mutated","Wildtype"), cex=1.4, lwd = 2, bty="n", ncol = 1)
+dev.off()
+
+
 #' # Coxph model fits
 sigma0 <- 0.1
 nu <- 1
 which.mu <- "Genes"
 
 #' ## Discovery cohort
-#' ### Raw
+#' ### Non-adjusted
 fitToronto <- CoxRFX(torontoX, torontoSurv, groups=torontoGroups, which.mu=which.mu, nu=nu, sigma0=sigma0)
 waldToronto <- WaldTest(fitToronto)
 
 survConcordance(fitToronto$surv ~ fitToronto$linear.predictors)
 
 #' ### Adjusted
+#+fitDCadj, warning=FALSE
 fitWeightedToronto <- CoxRFX(torontoX, torontoSurv, torontoGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Toronto"])
 waldWeightedToronto <- WaldTest(fitWeightedToronto)
 
@@ -220,70 +281,81 @@ survConcordance(fitWeightedToronto$surv ~ fitWeightedToronto$linear.predictors, 
 a <- AUC.uno(torontoSurv, torontoSurv, fitWeightedToronto$linear.predictors, times= seq(0,12, 0.1)) 
 round(a$iauc, digits = 3)
 
-png("./figures/DC.adj.coxph.auc.uno.png", width = 14, height = 14, units = "cm", res = 800)
-par(mar = c(4, 4, 4, 2) + 0.1, mgp=c(2.7,0.7,0), bty="L",  tcl =-0.2, las = 1, cex.lab = 1.1)
+png("./figures/DC.adj.coxph.auc.uno.png", width = 9, height = 10, units = "cm", res = 800)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex=1)
 plot(a$times, a$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc, lty = 3, lwd = 1)
-mtext("Adjusted Cox PH model DC", font= 2, side = 3, cex = 1, line = 0.5)
 legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(a$iauc,2)))
 dev.off()
 
 #' Time-dependent ROC AUC 
-r <- survivalROC(Stime = torontoSurv[,1], status=torontoSurv[,2], marker=fitWeightedToronto$linear.predictors-colMeans(fitWeightedToronto$Z) %*% fitWeightedToronto$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
+#+timeDependentROCUAUCdc, warning=FALSE
+r <- survivalROC(Stime = torontoSurv[,1], status=torontoSurv[,2], marker=fitWeightedToronto$linear.predictors-colMeans(fitWeightedToronto$Z) %*% fitWeightedToronto$coefficients, predict.time = 10, method="NNE", span=0.001)  
 round(r$AUC, digits = 3)
 
-png("./figures/DC.adj.coxph.roct.png", width = 14, height = 14, units = "cm", res = 800)
-par(mar = c(4, 4, 4, 2) + 0.1, mgp=c(2.7,0.7,0), bty="L",  tcl =-0.2, las = 1, cex.lab = 1.1)
+png("./figures/DC.adj.coxph.roct.png", width = 9, height = 10, units = "cm", res = 500)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex = 1)
 plot(r$FP, r$TP, type='s', 
      xlab="False Positive Rate", ylab="True Positive Rate", 
      col = "black")
-mtext("Adjusted Cox PH model DC", font= 2, side = 3, cex = 1, line = 0.5)
 abline(a = 0, b = 1, col = "grey70", lty = 1, lwd = 1)
-legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(r$AUC,2)))
+legend("bottomright", bty = "n", legend = paste("AUC = ",round(r$AUC,2)))
 dev.off()
 
+
 #' ## Validation cohort
-#' ### Raw
+#' ### Non-adjusted
 fitSanger <- CoxRFX(sangerX, sangerSurv, groups=sangerGroups, which.mu=which.mu, nu=nu, sigma0=sigma0)
 waldSanger <- WaldTest(fitSanger)
 
 survConcordance(sangerSurv ~ fitSanger$linear.predictors)
 
 #' ### Adjusted
+#+weightedVC, warning=FALSE
 fitWeightedSanger <- CoxRFX(sangerX, sangerSurv, sangerGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Sanger"])
 waldWeightedSanger <- WaldTest(fitWeightedSanger)
+waldWeightedSanger$p.adj <- p.adjust(p=waldWeightedSanger$p.value, method = "bonferroni")
+#View(waldWeightedSanger)
 
 survConcordance(sangerSurv ~ fitWeightedSanger$linear.predictors, weights=weights[cohort=="Sanger"])
 
 #' Uno's estimator of cumulative/dynamic AUC
 w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  #get right censored survival data for each individual
 s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  ##Adjust according to dimensions of survival object
-a <- AUC.uno(s, s, fitWeightedSanger$linear.predictors[w], times= c(0, 22, 0.1))   
+a <- AUC.uno(s, s, fitWeightedSanger$linear.predictors[w], times= seq(0, 22, 0.1))   
 round(a$iauc, digits = 3)
 
+png("./figures/VC.ajd.coxph.auc.uno.png", width = 9, height = 10, units = "cm", res = 500)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex=1)
+plot(a$times, a$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
+abline(h=a$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", legend = paste("AUC = ",round(a$iauc,2)))
+dev.off()
+
 #' Time-dependent ROC AUC 
-r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitWeightedSanger$linear.predictors[w]-colMeans(fitWeightedSanger$Z[w,]) %*% fitWeightedSanger$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
+#+tROCweightedVC, warning=FALSE
+r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitWeightedSanger$linear.predictors[w]-colMeans(fitWeightedSanger$Z[w,]) %*% fitWeightedSanger$coefficients, predict.time = 10, method="NNE", span=0.001)  
 round(r$AUC, digits = 3)
 
-png("./figures/VC.ajd.coxph.roct.png", width = 14, height = 14, units = "cm", res = 500)
-par(mar = c(4, 4, 4, 2) + 0.1, mgp=c(2.7,0.7,0), bty="L",  tcl =-0.2, las = 1, cex.lab = 1.1)
+png("./figures/VC.ajd.coxph.roct.png", width = 9, height = 10, units = "cm", res = 500)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex = 1)
 plot(r$FP, r$TP, type='s', 
      xlab="False Positive Rate", ylab="True Positive Rate", 
      col = "black")
-mtext("Adjusted Cox PH VC", font= 2, side = 3, cex = 1, line = 0.5)
 abline(a = 0, b = 1, col = "grey70", lty = 1, lwd = 1)
-legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(r$AUC,2)))
+legend("bottomright", bty = "n", legend = paste("AUC = ",round(r$AUC,2)))
 dev.off()
 
 i <- intersect(rownames(waldWeightedSanger), rownames(waldWeightedToronto))
-plot( waldWeightedToronto[i,"coef"], waldWeightedSanger[i, "coef"], xlab="Coef Discovery (adjusted)", ylab="Coef Validation (adjusted)", pch=19, cex=1)#sqrt(colMeans(rbind(sangerX[,i], torontoX[,i])>0)*100))
+plot( waldWeightedToronto[i,"coef"], waldWeightedSanger[i, "coef"], xlab="Coef Discovery (adjusted)", ylab="Coef Validation (adjusted)", pch=19, cex=1)
 segments(waldWeightedToronto[i,"coef"]  - 2*waldWeightedToronto[i,"sd"], waldWeightedSanger[i, "coef"], waldWeightedToronto[i,"coef"]  + 2*waldWeightedToronto[i,"sd"], waldWeightedSanger[i, "coef"], col="grey" )
 segments(waldWeightedToronto[i,"coef"]  , waldWeightedSanger[i, "coef"]-  2*waldWeightedSanger[i,"sd"], waldWeightedToronto[i,"coef"] , waldWeightedSanger[i, "coef"] +2*waldWeightedSanger[i,"sd"], col="grey")
 text(labels=sub("_.+","", i), waldWeightedToronto[i,"coef"], waldWeightedSanger[i, "coef"], pos=2, adj=c(0,1))
 abline(0,1)
 
-plot( waldToronto[i,"coef"], waldSanger[i, "coef"], xlab="Coef Discovery (raw)", ylab="Coef Validation (raw)", pch=19, cex=1, ylim=c(0,5),xlim=c(0,5))#sqrt(colMeans(rbind(sangerX[,i], torontoX[,i])>0)*100))
+plot( waldToronto[i,"coef"], waldSanger[i, "coef"], xlab="Coef Discovery (raw)", ylab="Coef Validation (raw)", pch=19, cex=1, ylim=c(0,5),xlim=c(0,5))
 segments(waldToronto[i,"coef"]  - 2*waldToronto[i,"sd"], waldSanger[i, "coef"], waldToronto[i,"coef"]  + 2*waldToronto[i,"sd"], waldSanger[i, "coef"], col="grey" )
 segments(waldToronto[i,"coef"]  , waldSanger[i, "coef"]-  2*waldSanger[i,"sd"], waldToronto[i,"coef"] , waldSanger[i, "coef"] +2*waldSanger[i,"sd"], col="grey")
 text(labels=sub("_.+","", i), waldToronto[i,"coef"], waldSanger[i, "coef"], pos=2, adj=c(0,1))
@@ -291,7 +363,7 @@ abline(0,1)
 
 #' ## Cross-validation
 
-#' ### Raw
+#' ### Non-adjusted
 sangerImp <- torontoX[1:nrow(sangerX),]
 sangerImp[,] <- NA
 i <- intersect(names(sangerX),colnames(torontoX))
@@ -299,6 +371,7 @@ sangerImp[,i] <- sangerX[,i]
 j <- setdiff(names(torontoX)[torontoGroups=="Genes"], names(sangerX))
 sangerImp[,j] <- 0
 
+#' DC fit, VC data
 pS <- PredictRiskMissing(fitToronto, sangerImp)
 survConcordance(sangerSurv ~ pS[,1])
 
@@ -317,6 +390,7 @@ torontoImp[,i] <- torontoX[,i]
 j <- setdiff(names(sangerX)[sangerGroups=="Genes"], names(torontoX))
 torontoImp[,j] <- 0
 
+#' VC fit, DC data
 pT <- PredictRiskMissing(fitSanger, torontoImp)
 survConcordance(torontoSurv ~ pT[,1])
 
@@ -326,12 +400,10 @@ plot(a$times, a$auc, xlab="Time [yr]", ylab="AUC", pch=16, col='grey')
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc)
 
-
 sangerM <- sangerX
 sangerM[,sangerGroups=="Blood"] <- NA
 p <- PredictRiskMissing(fitSanger, sangerM)
 survConcordance(sangerSurv ~ p[,1])
-
 
 plot(waldToronto[i,"coef"], waldSanger[i,"coef"], xlab="Coef Toronto", ylab="Coef Sanger", xlim=c(-0.5,2), ylim=c(-0.5,2))
 text(labels=i,waldToronto[i,"coef"], waldSanger[i,"coef"], pos=3)
@@ -340,7 +412,6 @@ segments(x0=waldToronto[i,"coef"]-1.96*waldToronto[i,"sd"], x1=waldToronto[i,"co
 abline(0,1)
 abline(h=0, lty=3)
 abline(v=0, lty=3)
-
 
 #' ### Adjusted
 #' DC fit, VC data
@@ -390,8 +461,8 @@ legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(a$iauc
 dev.off()
 
 #' ## Combined
-#' ### Raw
-#+ fitAll
+#' ### Non-adjusted
+#+ fitAll, warning=FALSE
 fitAll <- CoxRFX(allX, allSurv, allGroups, which.mu=which.mu, sigma0=sigma0, nu=nu)
 fitAll
 
@@ -407,13 +478,15 @@ plot(a$times, a$auc, xlab="Time [yr]", ylab="AUC", pch=16, col='grey')
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc)
 
-r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitAll$linear.predictors[w]-colMeans(fitAll$Z[w,]) %*% fitAll$coefficients, predict.time = 10, method="NNE", span=0.001)#0.25*nrow(s)^(-0.20))
+r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitAll$linear.predictors[w]-colMeans(fitAll$Z[w,]) %*% fitAll$coefficients, predict.time = 10, method="NNE", span=0.001)
 plot(r$FP, r$TP, type='s', xlab="FPR", ylab="TPR")
+round(r$AUC, 3)
 
 #' ### Adjusted
-#+ fitWeighted
+#+ fitWeighted, warning=FALSE
 fitWeighted <- CoxRFX(allX, allSurv, allGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights)
 waldWeighted <- WaldTest(fitWeighted)
+survConcordance(fitWeighted$surv ~ fitWeighted$linear.predictor, weights=weights)
 
 #' Dynamic/cumulative AUC
 w <- c(which(allSurv[,1]==0)[-1]-1, nrow(allSurv))
@@ -423,28 +496,29 @@ a <- AUC.uno(survAll2, survAll2, fitWeighted$linear.predictor[w], times=t)
 plot(a$times, a$auc, xlab="Time [yr]", ylab="AUC", pch=16, col='grey')
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc)
+round(a$iauc, 3)
 
-png("./figures/combined.ajd.coxph.auc.uno.png", width = 14, height = 14, units = "cm", res = 500)
-par(mar = c(4, 4, 4, 2) + 0.1, mgp=c(2.7,0.7,0), bty="L",  tcl =-0.2, las = 1, cex.lab = 1.1)
+png("./figures/combined.ajd.coxph.auc.uno.png", width = 9, height = 10, units = "cm", res = 500)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex=1)
 plot(a$times, a$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc, lty = 3, lwd = 1)
-mtext("Combined adjusted Cox PH", font= 2, side = 3, cex = 1, line = 0.5)
-legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(a$iauc,2)))
+#mtext("Combined adjusted Cox PH", font= 2, side = 3, line = 0.5)
+legend("bottomright", bty = "n", legend = paste("AUC = ",round(a$iauc,2)))
 dev.off()
 
 #' Time-depenent ROC
+#+tROCcombined, warning=FALSE
+r <- survivalROC(Stime = survAll2[,1], status=survAll2[,2], marker=fitWeighted$linear.predictors[w]-colMeans(fitWeighted$Z[w,]) %*% fitWeighted$coefficients, predict.time = 10, method="NNE", span=0.001) 
+round(r$AUC, 3)
 
-r <- survivalROC(Stime = survAll2[,1], status=survAll2[,2], marker=fitWeighted$linear.predictors[w]-colMeans(fitWeighted$Z[w,]) %*% fitWeighted$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-
-png("./figures/Combined.adj.coxph.roct.png", width = 14, height = 14, units = "cm", res = 500)
-par(mar = c(4, 4, 4, 2) + 0.1, mgp=c(2.7,0.7,0), bty="L",  tcl =-0.2, las = 1, cex.lab = 1.1)
+png("./figures/Combined.adj.coxph.roct.png", width = 9, height = 10, units = "cm", res = 500)
+par(mar = c(3.2, 3.2, 4, 2) + 0.1, mgp=c(2,0.5,0), bty="L",  tcl =-0.2, las = 1, cex = 1)
 plot(r$FP, r$TP, type='s', 
      xlab="False Positive Rate", ylab="True Positive Rate", 
      col = "black")
-mtext("Combined adjusted Cox PH", font= 2, side = 3, cex = 1, line = 0.5)
 abline(a = 0, b = 1, col = "grey70", lty = 1, lwd = 1)
-legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(r$AUC,2)))
+legend("bottomright", bty = "n", legend = paste("AUC = ",round(r$AUC,2)))
 dev.off()
 
 #' ### Bootstrap
@@ -471,79 +545,68 @@ apply(concBoots,1,quantile)
 
 #' ### Forest plot
 #+HR, fig.width=5, fig.height=5
-par(bty="n", mar=c(3,6,3,15)+.5, mgp=c(2,0.5,0), xpd=FALSE, tcl=-.25)
-#sd <- c(apply(allX, 2, sd), sd(as.matrix(allX)[allGroups=="Genes"]))
-c <- c(waldWeighted[-25,"coef"], "mu"=fitWeighted$mu["Genes"]); names(c)[1:24] <- rownames(waldWeighted)[-25]
+
+#' Figure 3
+pal1 <- c("#C32B4A", "#3F76B4", "#57B2AB", "#5E4FA2", "#EB6046")
+rownames(waldWeighted)
+
+png("./figures/Combined.adj.coxph.boostrapped.forest.png", width = 15.5, height = 17, units = "cm", res = 800)
+par(bty="n", mar=c(3,6,3,15)+.5, mgp=c(2,0.5,0), xpd=FALSE, tcl=-.25, cex = 0.9)
+c <- c(waldWeighted[-25,"coef"], "mu"=fitWeighted$mu["Genes"]); names(c)[1:24] <- rownames(waldWeighted)[-25] #-25 removes 'cohort' variable
 o <- c(23:24,1:22,25)
 s <- c(rep(1,2), rep(.5, 23))
 c <- exp(c*c(rep(0.5,22), c(1,1),0.5))
-#ci <- (rep(log(c), each=2) + c(-2,2) %o% waldWeighted$sd[-25])#apply(coefLogRidgeBoot,1,quantile, c(0.025,0.975))[,-25]
 ci <- apply(coefWeightedBoot,1,quantile, c(0.025,0.975))[,-25] * rep(c(rep(0.5,22), c(1,1),0.5), each=2)
 y <- rev(seq_along(c))
-plot(c[o], y, xlab="hazard ratio", log='x', ylab='', yaxt="n", pch=NA, xlim=c(0.5,50))
-abline(h=y, col="#EEEEEE", lty=1)
-abline(v=1, lty=1, col="grey")
-abline(v=c["mu.Genes"], col=mg14::colTrans(set1[3]), lty=1)
-segments(exp(ci[1,o]), y, exp(ci[2,o]),y)
-points(c[o], y, xlab="relative risk",  bg=set1[3], cex=2, pch=c(rep(21,24), 23))
-m <- match(names(c)[o],rownames(waldWeightedToronto))[-25]
-points(exp(c(waldWeightedToronto$coef[m], fitWeightedToronto$mu["Genes"])*s), y,bg=set1[4], pch=c(rep(21,24), 23), cex=1)
-m <- match(names(c)[o],rownames(waldWeightedSanger))[-25]
-points(exp(c(waldWeightedSanger$coef[m], fitWeightedSanger$mu["Genes"])*s), y,bg=set1[5], pch=c(rep(21,24), 23), cex=1)
-mtext(side=2, sub("mu.Genes","avg. genes",sub("_.+","",names(c)[o])), at=y, las=2, font=c(1,1,rep(3,22),1))#+grepl("DNMT3A|TP53|U2AF1",names(c)[o]))
-
-r <- sapply(split(as.data.frame(allX>0), control), colMeans)
-f <- sapply(split(allX, control), apply, 2, function(x) mean(x[x>0]))
-par(xpd=NA)
-points(rep(100,22),y[3:24], cex=sqrt(r[o[3:24],2]*10), pch=21, bg=set1[2])
-points(rep(100*1.5,22), y[3:24], cex=sqrt(r[o[3:24],1]*10), pch=21, bg=set1[1])
-points(rep(360,22),y[3:24], cex=sqrt(f[o[3:24],2]), pch=21, bg=set1[2])
-points(rep(360*1.5,22), y[3:24], cex=sqrt(f[o[3:24],1]), pch=21, bg=set1[1])
-legend(x=0.5, y=28, pch=21, pt.bg=set1[c(4,5,3)], c("DC","VC","combined"), bty="n", ncol=3, text.width=0.1)
-
-text(y=24, x=100, "recurrence")
-text(y=24, x=360*1.5, "VAF")
-
-axis(1, at=c(100,100*1.5), c("control","AML"), las=2, line=-1)
-axis(1, at=c(360,360*1.5), c("control","AML"), las=2, line=-1)
-
-#' Figure 2
-png("./figures/Combined.adj.coxph.boostrapped.forest.png", width = 18.5, height = 19, units = "cm", res = 800)
-par(bty="n", mar=c(3,6,3,15)+.5, mgp=c(2,0.5,0), xpd=FALSE, tcl=-.25)
-#sd <- c(apply(allX, 2, sd), sd(as.matrix(allX)[allGroups=="Genes"]))
-c <- c(waldWeighted[-25,"coef"], "mu"=fitWeighted$mu["Genes"]); names(c)[1:24] <- rownames(waldWeighted)[-25]
-o <- c(23:24,1:22,25)
-s <- c(rep(1,2), rep(.5, 23))
-c <- exp(c*c(rep(0.5,22), c(1,1),0.5))
-#ci <- (rep(log(c), each=2) + c(-2,2) %o% waldWeighted$sd[-25])#apply(coefLogRidgeBoot,1,quantile, c(0.025,0.975))[,-25]
-ci <- apply(coefWeightedBoot,1,quantile, c(0.025,0.975))[,-25] * rep(c(rep(0.5,22), c(1,1),0.5), each=2)
-y <- rev(seq_along(c))
-plot(c[o], y, xlab="Hazard ratio", log='x', ylab='', xaxt = "n", yaxt="n", pch=NA, xlim=c(0.5,50)) #, lab = ) #xlim=c(1, 13), lab = c(13,5,7)
+plot(c[o], y, xlab="Hazard ratio", log='x', ylab='', xaxt = "n", yaxt="n", pch=NA, xlim=c(0.5,50)) 
 atx <- axTicks(1)
 axis(1,at=atx,labels=atx)
-abline(h=y, col="#EEEEEE", lty=1)  
+segments(x0=0.5, x1 = 50, y0=y, y1=y, col="#EEEEEE", lty=1)
 abline(v=1, lty=1, col="grey")
 abline(v=c["mu.Genes"], col=mg14::colTrans("#57B2AB"), lty=1)
 segments(exp(ci[1,o]), y, exp(ci[2,o]),y)
-points(c[o], y, xlab="Relative risk",  bg=set1[3], cex=2, pch=c(rep(21,24), 23))
-m <- match(names(c)[o],rownames(waldWeightedToronto))[-25]
-points(exp(c(waldWeightedToronto$coef[m], fitWeightedToronto$mu["Genes"])*s), y,bg=set1[4], pch=c(rep(21,24), 23), cex=1)
-m <- match(names(c)[o],rownames(waldWeightedSanger))[-25]
-points(exp(c(waldWeightedSanger$coef[m], fitWeightedSanger$mu["Genes"])*s), y,bg=set1[5], pch=c(rep(21,24), 23), cex=1)
-mtext(side=2, sub("mu.Genes","Av. gene", sub("_.+","", sub("age", "Age", sub("gender", "Gender", names(c)[o])))), at=y, las=2, font=c(1,1,rep(3,22),1))
+points(c[o], y, xlab="",  bg=pal1[3], cex=2, pch=c(rep(21,24), 23)) 
+m1 <- match(names(c)[o],rownames(waldWeightedToronto))[-25]
+points(exp(c(waldWeightedToronto$coef[m1], fitWeightedToronto$mu["Genes"])*s), y,bg=pal1[4], pch=c(rep(21,24), 23), cex=1) 
+m2 <- match(names(c)[o],rownames(waldWeightedSanger))[-25]
+points(exp(c(waldWeightedSanger$coef[m2], fitWeightedSanger$mu["Genes"])*s), y,bg=pal1[5], pch=c(rep(21,24), 23), cex=1) 
+mtext(side=2, sub("mu.Genes","Av. gene", sub("_.+","", sub("age", "Age", sub("gender", "Gender", names(c)[o])))), at=y, las=2, cex=0.85, font=c(1,1,rep(3,22),1))
 r <- sapply(split(as.data.frame(allX>0), control), colMeans)
 f <- sapply(split(allX, control), apply, 2, function(x) mean(x[x>0]))
 par(xpd=NA)
-points(rep(100,22),y[3:24], cex=sqrt(r[o[3:24],2]*10), pch=21, bg=set1[2])
-points(rep(100*1.5,22), y[3:24], cex=sqrt(r[o[3:24],1]*10), pch=21, bg=set1[1])
+points(rep(100,22),y[3:24], cex=sqrt(r[o[3:24],2]*10), pch=21, bg=pal1[2]) 
+points(rep(100*1.5,22), y[3:24], cex=sqrt(r[o[3:24],1]*10), pch=21, bg=pal1[1]) 
 points(rep(360,22),y[3:24], cex=sqrt(f[o[3:24],2]), pch=21, bg=set1[2])
-points(rep(360*1.5,22), y[3:24], cex=sqrt(f[o[3:24],1]), pch=21, bg=set1[1])
-legend(x=0.5, y=28, pch=21, pt.bg=set1[c(4,5,3)], c("DC","VC","Combined"), bty="n", ncol=3, text.width=0.35)
-text(y=24, x=100, "  Recurrence")
-text(y=24, x=360*1.5, "VAF")
-axis(1, at=c(100,100*1.5), c("Control ","Pre-AML "), las=2, line=-1)
-axis(1, at=c(360,360*1.5), c("Control ","Pre-AML "), las=2, line=-1)
+points(rep(360*1.5,22), y[3:24], cex=sqrt(f[o[3:24],1]), pch=21, bg=pal1[1])
+legend(x=0.8, y=27.8, pch=21, pt.bg=pal1[c(4,5,3)], c("DC","VC","Combined"), bty="n", ncol=3, text.width=0.25)
+text(y=24, x=100, "     Frequency", cex = 0.92)
+text(y=24, x=360*1.5, "VAF    ", cex = 0.92)
+axis(1, at=c(100,100*1.5), c("Control ","Pre-AML "), las=2, line=-1, cex = 0.89)
+axis(1, at=c(360,360*1.5), c("Control ","Pre-AML "), las=2, line=-1, cex = 0.89)
 dev.off()
+
+Fig3Data1 <- data.frame(Parameter = sapply(strsplit(names(c[o]), "_"), "[", 1), 
+                        CombinedModel.HR = round(c[o], 1),
+                        CombinedModel.HR.CI2.5 = round(exp(ci[1,o]), 1), 
+                        CombinedModel.HR.CI97.5 = round(exp(ci[2,o]),1),
+                        DC.HR = round(exp(c(waldWeightedToronto$coef[m1], fitWeightedToronto$mu["Genes"])*s),1),
+                        VC.HR = round(exp(c(waldWeightedSanger$coef[m2], fitWeightedSanger$mu["Genes"])*s),1)
+                        )
+rownames(Fig3Data1) <- NULL
+head(Fig3Data1)
+
+table(rownames(r)==rownames(f))
+Fig3Data2 <- data.frame(Parameter = sapply(strsplit(rownames(r), "_"), "[", 1)[1:22],
+                        Frequency_PreAML = round(r[1:22, 1],3),
+                        Frequency_Controls = round(r[1:22, 2],3),
+                        MeanVAF_PreAML = round(f[1:22, 1],3),
+                        MeanVAF_Control = round(f[1:22, 2],3))
+head(Fig3Data2)
+rownames(Fig3Data2) <- NULL
+Fig3Data <- left_join(x = Fig3Data1, y = Fig3Data2, by = 'Parameter')
+Fig3Data$Parameter <- ifelse(Fig3Data$Parameter == "mu.Genes", "Av.gene", Fig3Data$Parameter)
+#View(Fig3Data)
+write_csv(Fig3Data, "./figures/Figure3_Data.csv")
 
 #' ### Dichotomous variables
 allXDich <- allX
@@ -551,10 +614,11 @@ allXDich[allGroups=="Genes"] <- (allXDich[allGroups=="Genes"] > 0) + 0
 fitWeightedDich <- CoxRFX(allXDich, allSurv, allGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights)
 
 WaldTest(fitWeightedDich)
+survConcordance(allSurv ~ fitWeightedDich$linear.predictors, weights=weights)
 
 #' ### Bootstrap adjustment
 #' To compare to the weighted CoxRFX models
-#+ fitBoot, cache=TRUE
+#+ fitBoot, cache=TRUE, warning=FALSE
 set.seed(42)
 
 p <- c(rep(n_total_sanger, sum(cohort=="Sanger" & control)), rep(n_total_toronto, sum(cohort=="Toronto" & control)))
@@ -567,12 +631,14 @@ b <- c(sample(which( sangerData$Diagnosis=="Control"), size=round(n_total_sanger
 
 fitBootSanger <- CoxRFX(sangerX[b,], sangerSurv[b,], sangerGroups, which.mu=which.mu, sigma0=sigma0, nu=nu)
 
+survConcordance(fitBootSanger$surv ~ fitBootSanger$linear.predictors)
 waldBootSanger <- WaldTest(fitBootSanger)
 
 set.seed(42)
 b <- c(sample(which( torontoData$Diagnosis=="Control"), size=round(n_total_toronto) - sum(torontoData$Diagnosis!="Control"), replace=TRUE), which(torontoData$Diagnosis!="Control"))
 
 fitBootToronto <- CoxRFX(torontoX[b,], torontoSurv[b,], torontoGroups, which.mu=which.mu, sigma0=sigma0, nu=nu)
+survConcordance(fitBootToronto$surv ~ fitBootToronto$linear.predictors)
 
 waldWeightedToronto <- WaldTest(fitBootToronto)
 
@@ -593,7 +659,7 @@ abline(0,1)
 #' ### LOOCV
 samples <- factor(c(as.character(sangerData$Individual), as.character(torontoData$Sample)))
 
-#+ looAll, cache=TRUE
+#+ looAll, cache=TRUE, warning=FALSE
 looAll <- do.call("rbind",mclapply(levels(samples), function(l){
 					i <- samples!=l
 					f <<- CoxRFX(allX[i,], allSurv[i,], allGroups, which.mu=which.mu, sigma0=sigma0, nu=nu)
@@ -613,6 +679,8 @@ c <- rbind(
 		`Combined (fit)`=as.data.frame(survConcordance(allSurv ~ fitAll$linear.predictors)[c("concordance","std.err")]),
 		`Combined (val)`=as.data.frame(survConcordance(allSurv ~ pp)[c("concordance","std.err")]))
 
+c
+
 par(mar=c(5,3,1,1), mgp=c(2,.5,0))
 b <- barplot(c$concordance-0.5, ylab="Concordance", col=rev(RColorBrewer::brewer.pal(6,"Paired")), ylim=c(0.5,0.88), offset=0.5)
 mg14::rotatedLabel(x=b, labels=rownames(c))
@@ -625,11 +693,13 @@ a <- AUC.uno(survAll2, survAll2, looAll$linear.predictor[w], times=t)
 plot(a$times, a$auc, xlab="Time [yr]", ylab="AUC", pch=16, col='grey')
 lines(a$times, predict(loess(a$auc ~ a$times, span=0.25)))
 abline(h=a$iauc)
+round(a$iauc, 3)
 
 r <- survivalROC(Stime = survAll2[,1], status=survAll2[,2], marker=looAll$linear.predictor[w], predict.time = 10, method="NNE", span=0.001)#0.25*nrow(s)^(-0.20))
 plot(r$FP, r$TP, type='s', xlab="FPR", ylab="TPR")
+round(r$AUC, 3)
 
-#' #### Individual Predictions (raw)
+#' #### Individual Predictions (non-adjusted)
 #+indPred, eval=TRUE, warning=FALSE
 plot(survfit(allSurv~1), conf.int=FALSE, xlab='Time after first sample [yr]', ylab='Predicted AML-free fraction', col='white', bty='L', yaxs='i', ylim=c(0,1.01))
 d <- data.frame(t=NULL, s=NULL, pch=NULL, col=character())
@@ -665,39 +735,6 @@ var.jack <- rowSums((t(looAll[i,-ncol(looAll)]) - coef.jack)^2) * (sum(i)-1)/sum
 p.jack <- pchisq(coef.jack^2/var.jack,1, lower.tail=FALSE)
 
 data.frame(coef.jack, p.jack, sig=mg14::sig2star(p.jack), n=colSums(allX[i,]>0))
-
-#' #### Simple model 
-#' age, maximum VAF, number of drivers
-v <- apply(allX[,allGroups=="Genes"], 1, max)*10
-n <- rowSums(allX[,allGroups=="Genes"]>0)
-a <- allX[,"age_10"]
-d <- data.frame(n,v,a) 
-summary(f <- coxph(allSurv ~ ., data=d ))
-
-los <- do.call("rbind",mclapply(levels(samples), function(l){
-					i <- samples!=l
-					f <<- coxph(allSurv ~ ., data=d, subset=i)					
-					p <- as.matrix(d[!i,]) %*% f$coefficients
-					r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
-					colnames(r) <- c(names(f$coefficients), "linear.predictor")
-					as.data.frame(r)
-#survConcordance(allSurv ~ fitAll$linear.predictors)
-				}, mc.cores=4))
-los <- los[order(order(samples)),]
-ps <- los$linear.predictor
-
-#' AML-free survival by number of drivers
-nonc <- rowSums(allX[,allGroups=="Genes"]>0)
-nonc <- cut(nonc, c(-1,0,1,2,max(nonc)))
-plot(survfit(allSurv~nonc), col=set1, xlab='Time after first sample [yr]', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01))
-legend("bottomleft", c(0,1,2,"3+"), col=set1, lty=1, bty='n', title="no. drivers")
-
-#' AML-free survival by max VAF
-mvaf <- apply(allX[,allGroups=="Genes"], 1, max)*10
-mvaf <- cut(mvaf, c(-1,0,4,8,max(mvaf)))
-plot(survfit(allSurv~mvaf), col=set1, xlab='Time after first sample [yr]', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01))
-levels(mvaf)[1] <- "None"
-legend("bottomleft", levels(mvaf), col=set1, lty=1, bty='n', title="Max. VAF%")
 
 #' ### Multiple bootstraps
 save(file="boot.RData", control, allX, allSurv, sigma0, nu, which.mu, allGroups, n_total, cohort, p)
@@ -748,6 +785,7 @@ looAllWeighted <- do.call("rbind",mclapply(levels(samples), function(l){
 				}, mc.cores=4))
 looAllWeighted <- looAllWeighted[order(order(samples)),]
 pp <- looAllWeighted$linear.predictor
+survConcordance(allSurv ~ pp, weights=weights)
 
 #+ highRiskWeighted
 h <- exp(looAllWeighted$linear.predictor) > 100
@@ -771,10 +809,8 @@ for(i in unique(samples)){
 			w <- t >= s[j,1] & t <= s[j,2]
 			k0 <- k[length(k)]
 			c <- if(s[nrow(s),3]==1) set1[1] else set1[2]
-			#if(c==set1[1]) next
 			lines(t[w], k, col=mg14:::colTrans(c), type='l')
 			p <- if(s[j,3]==1) 19 else 1
-			#points(t[w][length(k)], k[length(k)], col=c, pch=p)
 			d <<- rbind(d, data.frame(t=t[w][length(k)], s=k[length(k)], pch=p, col=c))     
 		}       
 	}
@@ -800,18 +836,12 @@ boxplot(exp(fitBoot$linear.predictors) ~ factor(1-control[b42], labels=c("Contro
 #+ bootFreq, cache=TRUE
 bX <- sapply(1:50, function(foo){
 			set.seed(foo)
-			#f <- colMeans(allX[control,1:17]>0) + 0.5/sum(control)
-			#X <- sapply(f, function(x) rbinom(n_total, 1, x))
 			X <- rbind(apply(allX[control,], 2, sample, n_total-sum(!control), replace=TRUE), apply(allX[!control,], 2, sample) )
 			lambda0 <- 5e-4
-			#ff <- apply(allX[,1:17],2, function(x) mean(x[x>0]))
-			r <- X%*%coef(fitBoot)#[1:17] #* ff)
+			r <- X%*%coef(fitBoot)
 			t <- rexp(n_total, lambda0 * exp(r))
 			tmax <- 13 + runif(n_total, 0,1)
 			s <- Surv(pmin(t,tmax), t < tmax)
-#plot(survfit(s ~ x))
-			#c0 <- coef(CoxRFX(X, s ))
-			
 			cases <- which(s[,2]==1)
 			controls1 <- sample(which(s[,2]==0), size=1*length(cases))
 			controls4 <- sample(which(s[,2]==0), size=sum(control))
@@ -820,17 +850,19 @@ bX <- sapply(1:50, function(foo){
 
 #' Expected vs observed driver frequency
 #+ plotBootFreq
-
+graphics.off()
 png("./figures/driver.freq.simulation.png", width = 15, height = 14, units = "cm", res = 500)
-par(mar = c(5, 4, 1.5, 0.5) + 0.1, mgp=c(2,0.4,0), las=1, tcl=-0.2)
-plot(-rowMeans(bX[,'controls_inc',]), type='h', ylim=c(-.5,1)/2.5, lwd=8, xaxt='n', yaxt = 'n',  ylab="Control  -  Driver frequency (%)  -  Pre-AML", xlab="", col=set1[2])
+par(mar = c(5, 4, 1.5, 0.5) + 0.1, mgp=c(2,0.4,0), las=1, tcl=-0.2, cex = 1)
+plot(-rowMeans(bX[,'controls_inc',]), type='h', lend = 2, ylim=c(-.5,1)/2.5, lwd=8, xaxt='n', yaxt = 'n',  ylab="Driver frequency (%)", xlab="", col=pal1[2])
 atx <- axTicks(2)
 axis(2,at=atx,labels= c(20, 10, 0, 10, 20, 30, 40))
-points(x=1:22+.5,-colMeans(allX[control,allGroups=="Genes"]>0), type='h', lwd=8, col=set1[1])
-points(rowMeans(bX[,"AML_inc",]), type='h', lwd=8, col=set1[2])
-points(x=1:22+.5,colMeans(allX[!control,allGroups=="Genes"]>0), type='h', lwd=8, col=set1[1])
+points(x=1:22+.5,-colMeans(allX[control,allGroups=="Genes"]>0), type='h', lend = 2, lwd=8, col=pal1[1])
+points(rowMeans(bX[,"AML_inc",]), type='h', lend = 2, lwd=8, col=pal1[2])
+points(x=1:22+.5,colMeans(allX[!control,allGroups=="Genes"]>0), type='h', lend = 2, lwd=8, col=pal1[1])
 mtext(side=1, at=1:22,sub("_.+","",colnames(allX)[allGroups=="Genes"]), las=2, font=3, line=0.7)
-legend("topright", fill=set1[2:1], c("Expected","Observed"), cex = 0.8)
+mtext(text = "Pre-AML", side=3, at = 12, las=1, font=1, line=-1.5, cex = 1.1)
+mtext(text = "Controls", side=1, at = 12, las=1, font=1, line=-1.5, cex = 1.1)
+legend("bottomright", fill=pal1[2:1], c("Expected","Observed"), cex = 0.8)
 abline(h=0)
 dev.off()
 
@@ -838,24 +870,216 @@ dev.off()
 avgVaf <- function(x) mean(x[x>0])
 
 png("./figures/driver.vaf.simulation.png", width = 15, height = 14, units = "cm", res = 500)
-par(mar = c(5, 4, 1.5, 0.5) + 0.1, mgp=c(2,0.4,0), las=1, tcl=-0.2)
-plot(-apply(bX[,'controls_vaf',],1,avgVaf)*10, type='h', ylim=c(-40,50), lwd=8, xaxt='n', yaxt = 'n', ylab="Control  -  Driver VAF (%)  -  Pre-AML", xlab="", col=set1[2])
+par(mar = c(5, 4, 1.5, 0.5) + 0.1, mgp=c(2,0.4,0), las=1, tcl=-0.2, cex=1)
+plot(-apply(bX[,'controls_vaf',],1,avgVaf)*10, type='h', lend = 2, ylim=c(-40,50), lwd=8, xaxt='n', yaxt = 'n', ylab="Driver VAF (%)", xlab="", col=pal1[2])
 atx <- axTicks(2)
 axis(2,at=atx,labels= c(40, 20,0, 20, 40))
-points(x=1:22+.5,-apply(allX[control,allGroups=="Genes"],2,avgVaf)*10, type='h', lwd=8, col=set1[1])
-points(apply(bX[,"AML_vaf",],1,avgVaf)*10, type='h', lwd=8, col=set1[2])
-points(x=1:22+.5,apply(allX[!control,allGroups=="Genes"],2,avgVaf)*10, type='h', lwd=8, col=set1[1])
-mtext(side=1, at=1:22,sub("_.+","",colnames(allX)[allGroups=="Genes"]), las=2, font=3, line = 0.6)
-legend("bottomleft", fill=set1[2:1], c("Expected","Observed"), cex = 0.8)
+points(x=1:22+.5,-apply(allX[control,allGroups=="Genes"],2,avgVaf)*10, type='h', lend = 2, lwd=8, col=pal1[1])
+points(apply(bX[,"AML_vaf",],1,avgVaf)*10, type='h', lend = 2, lwd=8, col=pal1[2])
+points(x=1:22+.5,apply(allX[!control,allGroups=="Genes"],2,avgVaf)*10, type='h', lend = 2, lwd=8, col=pal1[1])
+mtext(side=1, at=1:22,sub("_.+","",colnames(allX)[allGroups=="Genes"]), las=2, font=3, line = 0.7)
+mtext(text = "Pre-AML", side=3, at = 12, las=1, font=1, line=-1.5, cex = 1.1)
+mtext(text = "Controls", side=1, at = 12, las=1, font=1, line=-1.5, cex = 1.1)
+legend("bottomright", fill=pal1[2:1], c("Expected","Observed"), cex = 0.8)
 abline(h=0)
 dev.off()
+
+#' ### Simple models
+#+SimpleModels, cache=TRUE, warning=FALSE
+
+samples <- factor(c(as.character(sangerData$Individual), as.character(torontoData$Sample)))
+#' max vaf:
+v <- apply(allX[,allGroups=="Genes"], 1, max)*10
+#' cumulative vaf
+c <- apply(allX[,allGroups=="Genes"], 1, sum)*10
+#' number of mutations
+m <- rowSums(allX[,allGroups=="Genes"]>0)
+#' any mutation
+a <- as.integer(m>0)
+
+#' #### Presence of any mutation
+d <- data.frame(a) 
+summary(f <- coxph(allSurv ~ ., data=d ))
+
+los <- do.call("rbind",mclapply(levels(samples), function(l){
+  i <- samples!=l
+  f <<- coxph(allSurv ~ ., data=d, subset=i)					
+  p <- as.matrix(d[!i,]) %*% f$coefficients
+  r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
+  colnames(r) <- c(names(f$coefficients), "linear.predictor")
+  as.data.frame(r)
+}, mc.cores=4))
+psAnyMt <- los[order(order(samples)),]
+
+survConcordance(allSurv ~ psAnyMt$linear.predictor)
+
+#' Dynamic/cumulative AUC
+w <- c(which(allSurv[,1]==0)[-1]-1, nrow(allSurv))
+survAll2 <- Surv(allSurv[w,2], allSurv[w,3])
+t <- seq(0,22,0.1)
+allX2 <- allX[w, ]
+
+auc.uno <- AUC.uno(survAll2, survAll2, psAnyMt$linear.predictor[w], times=t)
+
+plot(auc.uno$times, auc.uno$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(auc.uno$times, predict(loess(auc.uno$auc ~ auc.uno$times, span=0.25)))
+abline(h=auc.uno$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(auc.uno$iauc,2)))
+
+AnyMt.a <- auc.uno
+
+#' Presence of any mutation + vaf
+d <- data.frame(a,v) 
+summary(f <- coxph(allSurv ~ ., data=d ))
+
+los <- do.call("rbind",mclapply(levels(samples), function(l){
+  i <- samples!=l
+  f <<- coxph(allSurv ~ ., data=d, subset=i)					
+  p <- as.matrix(d[!i,]) %*% f$coefficients
+  r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
+  colnames(r) <- c(names(f$coefficients), "linear.predictor")
+  as.data.frame(r)
+}, mc.cores=4))
+psAnyMtVaf <- los[order(order(samples)),]
+
+survConcordance(allSurv ~ psAnyMtVaf$linear.predictor)
+
+#' Dynamic/cumulative AUC
+auc.uno <- AUC.uno(survAll2, survAll2, psAnyMtVaf$linear.predictor[w], times=t)
+
+plot(auc.uno$times, auc.uno$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(auc.uno$times, predict(loess(auc.uno$auc ~ auc.uno$times, span=0.25)))
+abline(h=auc.uno$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(auc.uno$iauc,2)))
+
+AnyMtVaf.a <- auc.uno
+
+#' #### Number of mutations + vaf
+d <- data.frame(m,v) 
+summary(f <- coxph(allSurv ~ ., data=d ))
+
+los <- do.call("rbind",mclapply(levels(samples), function(l){
+  i <- samples!=l
+  f <<- coxph(allSurv ~ ., data=d, subset=i)					
+  p <- as.matrix(d[!i,]) %*% f$coefficients
+  r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
+  colnames(r) <- c(names(f$coefficients), "linear.predictor")
+  as.data.frame(r)
+}, mc.cores=4))
+psNMtVaf <- los[order(order(samples)),]
+
+survConcordance(allSurv ~ psNMtVaf$linear.predictor)
+
+#' Dynamic/cumulative AUC
+auc.uno <- AUC.uno(survAll2, survAll2, psNMtVaf$linear.predictor[w], times=t)
+
+plot(auc.uno$times, auc.uno$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(auc.uno$times, predict(loess(auc.uno$auc ~ auc.uno$times, span=0.25)))
+abline(h=auc.uno$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(auc.uno$iauc,2)))
+
+NMtVaf.a <- auc.uno
+
+#' #### Number of mutations + cumulative vaf
+#+warning=FALSE
+d <- data.frame(m,c) 
+summary(f <- coxph(allSurv ~ ., data=d ))
+
+los <- do.call("rbind",mclapply(levels(samples), function(l){
+  i <- samples!=l
+  f <<- coxph(allSurv ~ ., data=d, subset=i)					
+  p <- as.matrix(d[!i,]) %*% f$coefficients
+  r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
+  colnames(r) <- c(names(f$coefficients), "linear.predictor")
+  as.data.frame(r)
+}, mc.cores=4))
+psNMtCumVaf <- los[order(order(samples)),]
+
+survConcordance(allSurv ~ psNMtCumVaf$linear.predictor)
+
+#' Dynamic/cumulative AUC
+auc.uno <- AUC.uno(survAll2, survAll2, psNMtCumVaf$linear.predictor[w], times=t)
+
+plot(auc.uno$times, auc.uno$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(auc.uno$times, predict(loess(auc.uno$auc ~ auc.uno$times, span=0.25)))
+abline(h=auc.uno$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(auc.uno$iauc,2)))
+
+NMtCumVaf.a <- auc.uno
+
+#'Gene-level risks
+#+simpleModelGenes, warning=FALSE
+d <- allX
+summary(f <- coxph(allSurv ~ ., data=d))
+
+los <- do.call("rbind",mclapply(levels(samples), function(l){
+  i <- samples!=l
+  f <<- coxph(allSurv ~ ., data=d, subset=i)					
+  p <- as.matrix(d[!i,]) %*% f$coefficients
+  r <- cbind(matrix(f$coefficients, nrow=length(p), ncol=length(f$coefficients), byrow=TRUE), linear.predictor=p)
+  colnames(r) <- c(names(f$coefficients), "linear.predictor")
+  as.data.frame(r)
+}, mc.cores=4))
+psGenes <- los[order(order(samples)),]
+
+survConcordance(allSurv ~ psGenes$linear.predictor)
+
+#' Dynamic/cumulative AUC
+auc.uno <- AUC.uno(survAll2, survAll2, psGenes$linear.predictor[w], times=t)
+
+plot(auc.uno$times, auc.uno$auc, xlab="Time (years)", ylab="AUC", pch=16, col="grey80", ylim = c(0,1.0))
+lines(auc.uno$times, predict(loess(auc.uno$auc ~ auc.uno$times, span=0.25)))
+abline(h=auc.uno$iauc, lty = 3, lwd = 1)
+legend("bottomright", bty = "n", cex = 1.2, legend = paste("AUC = ",round(auc.uno$iauc,2)))
+
+Genes.a <- auc.uno
+
+# Concordance summary
+c <- rbind(
+  `(1) Any mutations`=as.data.frame(survConcordance(allSurv ~ psAnyMt$linear.predictor)[c("concordance","std.err")]),
+  `(2) Any mt + VAF`=as.data.frame(survConcordance(allSurv ~ psAnyMtVaf$linear.predictor)[c("concordance","std.err")]),
+  `(3) No. mt + cumulative VAF`=as.data.frame(survConcordance(allSurv ~ psNMtCumVaf$linear.predictor)[c("concordance","std.err")]),
+  `(4) Gene model`=as.data.frame(survConcordance(allSurv ~ psGenes$linear.predictor)[c("concordance","std.err")]))
+
+c 
+set1 <- RColorBrewer::brewer.pal(6,"Set1")
+
+par(mar = c(9, 4, 1.5, 0.5) + 0.1, mgp=c(2.7,0.4,0), las=1, tcl=-0.2)
+b <- barplot(c$concordance-0.5, ylab="Concordance", col=set1, ylim=c(0.5,0.88), offset=0.5)
+mg14::rotatedLabel(x=b, labels=rownames(c))
+segments(b,c$concordance+c$std.err,b,c$concordance-c$std.err)
+
+#'Dynamic/cumulative AUC summary
+
+d.auc <- data.frame(iauc = c(AnyMt.a$iauc, AnyMtVaf.a$iauc, NMtCumVaf.a$iauc, 0.79))
+rownames(d.auc) <- c("(1) Any mutations", "(2) Any mt + VAF", "(3) No. mt + cumulative VAF", "(4) Gene model")
+
+d.auc
+
+par(mar = c(9, 4, 1.5, 0.5) + 0.1, mgp=c(2.7,0.4,0), las=1, tcl=-0.2)
+b <- barplot(d.auc$iauc-0.5, ylab="Dynamic AUC", col=set1, ylim=c(0.5,0.80), offset=0.5)
+mg14::rotatedLabel(x=b, labels=rownames(d.auc))
+
+#' AML-free survival by number of drivers
+nonc <- rowSums(allX[,allGroups=="Genes"]>0)
+nonc <- cut(nonc, c(-1,0,1,2,max(nonc)))
+plot(survfit(allSurv~nonc), col=set1, xlab='Time after first sample [yr]', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01))
+legend("bottomleft", c(0,1,2,"3+"), col=set1, lty=1, bty='n', title="no. drivers")
+
+#' AML-free survival by max VAF
+mvaf <- apply(allX[,allGroups=="Genes"], 1, max)*10
+mvaf <- cut(mvaf, c(-1,0,4,8,max(mvaf)))
+plot(survfit(allSurv~mvaf), col=set1, xlab='Time after first sample [yr]', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01))
+levels(mvaf)[1] <- "None"
+legend("bottomleft", levels(mvaf), col=set1, lty=1, bty='n', title="Max. VAF%")
+
 
 #' # Logistic regression
 library(glmnet)
 library(ROCR)
 
 #' ## Combined
-#+ fitLogRidge
+#+ fitLogRidge, warning=FALSE
 set.seed(42)
 y <- allSurv[,3]
 x <- allX
@@ -878,7 +1102,7 @@ set.seed(42)
 x <- cbind(as.matrix(torontoX), mu.Genes=rowSums(torontoX[torontoGroups=="Genes"]))
 fitLogRidgeToronto <- cv.glmnet(x, torontoSurv[,2], alpha=0, standardize=FALSE, penalty.factor=c(torontoGroups=="Genes",FALSE), family="binomial", lambda=10^seq(-5,5,0.1)/nrow(x))
 l <- max(which(abs(fitLogRidgeToronto$cvm- min(fitLogRidgeToronto$cvm)) < 0.01))
-coefFitLogRidgeToronto <- coef(fitLogRidgeToronto, s=fitLogRidge$lambda.min *nrow(allX)/nrow(torontoX))[-1,1]#fitLogRidgeToronto$lambda[l])#fitLogRidgeToronto$lambda.min)[-1]
+coefFitLogRidgeToronto <- coef(fitLogRidgeToronto, s=fitLogRidge$lambda.min *nrow(allX)/nrow(torontoX))[-1,1]
 w <- names(coefFitLogRidgeToronto) %in% colnames(torontoX)[torontoGroups=="Genes"]
 coefFitLogRidgeToronto[w] <- coefFitLogRidgeToronto[w] + coefFitLogRidgeToronto["mu.Genes"]
 
@@ -886,15 +1110,12 @@ coefFitLogRidgeToronto[w] <- coefFitLogRidgeToronto[w] + coefFitLogRidgeToronto[
 #+ fitLogRidgeSanger
 set.seed(42)
 x <- cbind(as.matrix(sangerX), mu.Genes=rowSums(sangerX[sangerGroups=="Genes"]))
-#fitLogRidgeSanger <- cv.glmnet(x, sangerSurv[,3], alpha=0, standardize=FALSE, penalty.factor=c(sangerGroups%in%c("Genes","Blood"),FALSE), family="binomial", lambda=10^seq(-5,5,0.1)/nrow(x), nfolds=nrow(x))
 y <- sangerSurv[,3]
 fitLogRidgeSanger <- glmnet(x, y, alpha=0, standardize=FALSE, penalty.factor=c(sangerGroups%in%c("Genes","Blood"),1e-2) , family="binomial",lambda=10^seq(-5,5,0.1)/nrow(x))
-#l <- max(which(abs(fitLogRidgeSanger$cvm- min(fitLogRidgeSanger$cvm)) < 0.01))
-coefFitLogRidgeSanger <- coef(fitLogRidgeSanger, s=fitLogRidge$lambda.min*nrow(allX)/nrow(sangerX)/4)[-1,1]#fitLogRidgeToronto$lambda.min)[-1]
+coefFitLogRidgeSanger <- coef(fitLogRidgeSanger, s=fitLogRidge$lambda.min*nrow(allX)/nrow(sangerX)/4)[-1,1]
 w <- names(coefFitLogRidgeSanger) %in% colnames(sangerX)[sangerGroups=="Genes"]
 coefFitLogRidgeSanger[w] <- coefFitLogRidgeSanger[w] + coefFitLogRidgeSanger["mu.Genes"]
 coefFitLogRidgeSanger
-
 
 #' ## Bootstrap CIs
 #+ coefLogRidgeBoot
@@ -915,7 +1136,6 @@ coefLogRidgeBoot <- sapply(1:100, function(foo){
 #' ## Forest plot
 #+RR, fig.width=5, fig.height=5
 par(bty="n", mar=c(3,6,3,10)+.5, mgp=c(2,0.5,0), xpd=FALSE)
-#sd <- c(apply(allX, 2, sd), sd(as.matrix(allX)[allGroups=="Genes"]))
 c <- exp(coefLogRidge[-25])
 o <- c(23:24,1:22,25)
 ci <- apply(coefLogRidgeBoot,1,quantile, c(0.025,0.975))[,-25]
@@ -930,7 +1150,7 @@ m <- match(names(c)[o],names(coefFitLogRidgeToronto))
 points(exp(coefFitLogRidgeToronto[m]), y,bg=set1[4], pch=c(rep(21,24), 23), cex=1)
 m <- match(names(c)[o],names(coefFitLogRidgeSanger))
 points(exp(coefFitLogRidgeSanger[m]), y,bg=set1[5], pch=c(rep(21,24), 23), cex=1)
-mtext(side=2, sub("mu.Genes","avg. genes",sub("_.+","",names(c)[o])), at=y, las=2, font=c(1,1,rep(3,22),1))#+grepl("DNMT3A|TP53|U2AF1",names(c)[o]))
+mtext(side=2, sub("mu.Genes","avg. genes",sub("_.+","",names(c)[o])), at=y, las=2, font=c(1,1,rep(3,22),1))
 
 r <- sapply(split(as.data.frame(allX>0), control), colMeans)
 f <- sapply(split(allX, control), apply, 2, function(x) mean(x[x>0]))
@@ -946,8 +1166,6 @@ text(y=24, x=38, "VAF")
 
 axis(1, at=c(18,18*1.2), c("control","AML"), las=2, line=-1)
 axis(1, at=c(36,36*1.2), c("control","AML"), las=2, line=-1)
-
-#dev.copy2pdf(file="RR.pdf", width=5, height=5)
 
 #' ## AUC
 #+ AUClogRidgeBoot, eval=TRUE, warning=FALSE
@@ -1018,6 +1236,7 @@ performance(prediction(ImputeMissing(sangerX, as.matrix(torontoImp)) %*% coefFit
 # saveWorkbook(wb, file="SupplementaryTables.xlsx") 
 
 #' #Clinical/Demographic model 
+#' Necessary to reconstruct matrices and survival objects to use data from VC for all 8 samples sequenced in both cohorts
 #' ## Discovery cohort 
 #' Data
 #' 83 pre-AML (keeping duplicates with validation cohort)
@@ -1033,7 +1252,6 @@ colnames(torontoData)
 
 #' Manually standardize magnitudes
 torontoData <- torontoData[!duplicated(torontoData),]
-#View(data)
 
 gene_vars <- c("CALR", "NRAS", "DNMT3A", "SF3B1", "IDH1", "KIT", "TET2", "RAD21", "JAK2", "CBL", "KRAS", "PTPN11", "IDH2", "TP53", "NF1", "SRSF2", "CEBPA", "ASXL1", "RUNX1", "U2AF1", "BCOR", "KDM6A", "PHF6", "KMT2C", "KMT2D")
 
@@ -1085,12 +1303,6 @@ table(sangerGroups)
 colnames(sangerX)
 sangerGroups
 
-g <- sangerGroups=="Genes"
-sangerX[g] <- sangerX[g] * 10
-names(sangerX)[g] <- paste(names(sangerX[g]),"0.1", sep="_")
-y <- StandardizeMagnitude(sangerX[!g])  
-sangerX <- cbind(sangerX[g],y)
-
 poorMansImpute <- function(x) {x[is.na(x)] <- mean(x, na.rm=TRUE); return(x)}
 sangerX <- as.data.frame(sapply(sangerX, poorMansImpute))
 
@@ -1112,10 +1324,47 @@ sangerSurv <- Surv(time = bar$start, time2 = bar$end, event = bar$Diagnosis!="Co
 
 plot(survfit(sangerSurv~ 1), col= "black", main = "VC", xlab='Time after first sample (years)', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T) #mark = 1
 
+#' Figure 3 c-e
+summary(sangerX$rdw)
+rdw <- cut(sangerX$rdw, c(11, 14, max(sangerX$rdw)))
+levels(rdw) <- c("11-14", "14+")
+table(rdw)
+  
+selected_genes <- c("DNMT3A", "TET2", "TP53", "U2AF1")
+
+png("./figures/CombinedCohorts.KM.selected.genes.png", width = 8.5, height = 17.5, units = "cm", res = 800)
+par(mfrow=c(4,2), mar = c(1.9, 1.9, 1.7, 0.7) + 0.1, mgp=c(2.2,0.4,0), bty="L", xpd=TRUE, las=1, tcl=-0.15, cex.axis=1.15, cex.lab = 1)
+for (i in 1:length(selected_genes)) {
+  #i <- 1
+  gene <- selected_genes[i]
+  plot(survfit(surv ~ X[[gene]] == 0), col= pal1, bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, conf.int = F)
+  mtext(gene, font=3, side = 3, line = 0.2, cex = 0.83)
+  legend("bottomleft", col=pal1[1:2], lty=1, c("MT","WT"), lwd = 1.5, bty="n", ncol = 1, cex = 0.9, seg.len=0.7)
+}
+plot(survfit(surv ~ n_drivers), col=rev(pal1[1:3]), conf.int = F, mark.time = T, bty='L', yaxs='i', ylim=c(0,1.01))
+mtext("Number of drivers", font=1, side = 3, line = 0.7, cex = 0.83)
+legend("bottomleft", legend = levels(n_drivers), col= rev(pal1[1:3]), lty=1, lwd = 1.5, bty='n', title="", cex = 1, seg.len=0.7)
+plot(survfit(surv ~ mvaf), col= rev(pal1[1:4]), conf.int = F, mark.time = T, bty='L', yaxs='i', ylim=c(0,1.01))
+mtext("Maximum VAF (%)", font=1, side = 3, line = 0.7, cex = 0.83)
+legend("bottomleft", levels(mvaf), col=rev(pal1[1:4]), lty=1, lwd = 1.5, bty='n', title="", cex = 1, seg.len=0.7)
+plot(survfit(sangerSurv ~ rdw), col= rev(pal1[1:2]), conf.int = F, mark.time = T, bty='L', yaxs='i', ylim=c(0,1.01))
+mtext("RDW", font=1, side = 3, line = 0.2, cex = 0.83)
+legend("bottomleft", levels(rdw), col=rev(pal1[1:2]), lty=1, lwd = 1.5, bty='n', title="", cex = 1, seg.len=0.7)
+dev.off()
+
+
+#'Standardise magnitudes
+#'g <- sangerGroups=="Genes"
+sangerX[g] <- sangerX[g] * 10
+names(sangerX)[g] <- paste(names(sangerX[g]),"0.1", sep="_")
+y <- StandardizeMagnitude(sangerX[!g])  
+sangerX <- cbind(sangerX[g],y)
+
+
 #' ## Expected AML incidence
 #' Validation cohort
 w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))
-sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) ## Unique individuals
+sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) 
 
 expected_rate_sanger_cr <- mean(aml_inc_cr(sangerX[w,"gender"],sangerX[w,"age_10"]*10, sangerX[w,"age_10"]*10+ pmax(1,sangerSurv2[,1]))[!sangerSurv2[,2]])
 
@@ -1179,14 +1428,10 @@ waldWeightedSanger <- WaldTest(fitWeightedSanger)
 survConcordance(sangerSurv ~ fitWeightedSanger$linear.predictors, weights=weights[cohort=="Sanger"])
 
 #' Uno's estimator of cumulative/dynamic AUC
-w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  #get right censored survival data for each individual
-s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  ##Adjust according to dimensions of survival object
+w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  
+s <- Surv(sangerSurv[w,2], sangerSurv[w,3]) 
 a <- AUC.uno(s, s, fitWeightedSanger$linear.predictors[w], times= c(0, 22, 0.1))   
 round(a$iauc, digits = 3)
-
-#' Time-dependent ROC AUC 
-r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitWeightedSanger$linear.predictors[w]-colMeans(fitWeightedSanger$Z[w,]) %*% fitWeightedSanger$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-round(r$AUC, digits = 3)
 
 #' #Model excluding controls without mutations
 #' Include only controls with ARCH & all pre-AML (regardless of mutation status)
@@ -1210,7 +1455,6 @@ colnames(torontoData)
 
 #' Manually standardize magnitudes
 torontoData <- torontoData[!duplicated(torontoData),]
-#View(data)
 
 torontoX <- torontoData[, colnames(torontoData) %in% c(gene_vars, "age", "gender")]
 
@@ -1234,13 +1478,13 @@ torontoSurv <- Surv(torontoData$fu_years, torontoData$Diagnosis=="AML")
 plot(survfit(torontoSurv~ 1), col= "black", main = "DC", xlab='Time after first sample (years)', ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T) 
 plot(survfit(torontoSurv ~ torontoData$Diagnosis), xlab='Time after first sample (years)', main = "DC", ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, col = set1[1:2])
 
-
 #' ## Validation cohort
 f = "./arch_data/VC_vaf_matrix_262ctrl_37aml.csv"
 sangerData <- read.csv(f)
 dim(sangerData)
 sangerData <- sangerData[rowSums(sangerData[, colnames(sangerData) %in% gene_vars])>0 | sangerData$Diagnosis == "AML", ]
 dim(sangerData)
+length(unique(sangerData$Individual))
 
 sangerData$hcdate <- as.Date(sangerData$hcdate)
 sangerData$dodx <- as.Date(sangerData$dodx)
@@ -1265,7 +1509,7 @@ sangerGroups
 g <- sangerGroups=="Genes"
 sangerX[g] <- sangerX[g] * 10
 names(sangerX)[g] <- paste(names(sangerX[g]),"0.1", sep="_")
-y <- StandardizeMagnitude(sangerX[!g])  #only affects coefficients, not significance
+y <- StandardizeMagnitude(sangerX[!g])  
 sangerX <- cbind(sangerX[g],y)
 
 poorMansImpute <- function(x) {x[is.na(x)] <- mean(x, na.rm=TRUE); return(x)}
@@ -1343,10 +1587,10 @@ which.mu <- "Genes"
 fitToronto <- CoxRFX(torontoX, torontoSurv, groups=torontoGroups, which.mu=which.mu, nu=nu, sigma0=sigma0)
 waldToronto <- WaldTest(fitToronto)
 
-survConcordance(fitToronto$surv ~ fitToronto$linear.predictors)
+survConcordance(fitToronto$surv ~ fitToronto$linear.predictors, weights = weights[cohort=="Toronto"])
 
 #' #### Adjusted
-#+ eval = TRUE, warning=FALSE
+#+weightedDC, warning=FALSE
 fitWeightedToronto <- CoxRFX(torontoX, torontoSurv, torontoGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Toronto"])
 waldWeightedToronto <- WaldTest(fitWeightedToronto)
 
@@ -1356,37 +1600,27 @@ survConcordance(fitWeightedToronto$surv ~ fitWeightedToronto$linear.predictors, 
 a <- AUC.uno(torontoSurv, torontoSurv, fitWeightedToronto$linear.predictors, times= seq(0,12, 0.1)) 
 round(a$iauc, digits = 3)
 
-#' Time-dependent ROC AUC 
-r <- survivalROC(Stime = torontoSurv[,1], status=torontoSurv[,2], marker=fitWeightedToronto$linear.predictors-colMeans(fitWeightedToronto$Z) %*% fitWeightedToronto$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-round(r$AUC, digits = 3)
-
 #' ### Validation cohort
 #' #### Raw
 fitSanger <- CoxRFX(sangerX, sangerSurv, groups=sangerGroups, which.mu=which.mu, nu=nu, sigma0=sigma0)
 waldSanger <- WaldTest(fitSanger)
-#' RDW p-val 9.171138e-03
 survConcordance(sangerSurv ~ fitSanger$linear.predictors)
 
 #' #### Adjusted
 fitWeightedSanger <- CoxRFX(sangerX, sangerSurv, sangerGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Sanger"])
 waldWeightedSanger <- WaldTest(fitWeightedSanger)
-#' RDW p-val 1.233241e-07
+waldWeightedSanger$p.adj <- p.adjust(p = waldWeightedSanger$p.value, method = "bonferroni")
+#View(waldWeightedSanger)
 
 survConcordance(sangerSurv ~ fitWeightedSanger$linear.predictors, weights=weights[cohort=="Sanger"])
 
 #Uno's estimator of cumulative/dynamic AUC
-w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  #get right censored survival data for each individual
-s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  ##Adjust according to dimensions of survival object
+w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  
+s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  
 a <- AUC.uno(s, s, fitWeightedSanger$linear.predictors[w], times= c(0, 22, 0.1))   
 round(a$iauc, digits = 3)
 
-#' Time-dependent ROC AUC 
-r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitWeightedSanger$linear.predictors[w]-colMeans(fitWeightedSanger$Z[w,]) %*% fitWeightedSanger$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-round(r$AUC, digits = 3)
-
-
 #' #CoxPH model excluding all samples without ARCH-PD
-#' 
 #' ## Discovery cohort 
 #' Data
 f = "./arch_data/DC_vaf_matrix_414ctrl_91aml.csv"  
@@ -1460,7 +1694,7 @@ sangerGroups
 g <- sangerGroups=="Genes"
 sangerX[g] <- sangerX[g] * 10
 names(sangerX)[g] <- paste(names(sangerX[g]),"0.1", sep="_")
-y <- StandardizeMagnitude(sangerX[!g])  #only affects coefficients, not significance
+y <- StandardizeMagnitude(sangerX[!g])  
 sangerX <- cbind(sangerX[g],y)
 
 poorMansImpute <- function(x) {x[is.na(x)] <- mean(x, na.rm=TRUE); return(x)}
@@ -1487,7 +1721,7 @@ plot(survfit(sangerSurv~ 1), col= "black", main = "VC", xlab='Time after first s
 #' ## Expected AML incidence
 #' Validation cohort
 w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))
-sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) ## Unique individuals
+sangerSurv2 <- Surv(sangerSurv[w,2], sangerSurv[w,3]) 
 
 expected_rate_sanger_cr <- mean(aml_inc_cr(sangerX[w,"gender"],sangerX[w,"age_10"]*10, sangerX[w,"age_10"]*10+ pmax(1,sangerSurv2[,1]))[!sangerSurv2[,2]])
 
@@ -1540,6 +1774,7 @@ waldToronto <- WaldTest(fitToronto)
 survConcordance(fitToronto$surv ~ fitToronto$linear.predictors)
 
 #' #### Adjusted
+#+fitDCweighted, warning=FALSE
 fitWeightedToronto <- CoxRFX(torontoX, torontoSurv, torontoGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Toronto"])
 waldWeightedToronto <- WaldTest(fitWeightedToronto)
 
@@ -1549,33 +1784,23 @@ survConcordance(fitWeightedToronto$surv ~ fitWeightedToronto$linear.predictors, 
 a <- AUC.uno(torontoSurv, torontoSurv, fitWeightedToronto$linear.predictors, times= seq(0,12, 0.1)) 
 round(a$iauc, digits = 3)
 
-#' Time-dependent ROC AUC 
-r <- survivalROC(Stime = torontoSurv[,1], status=torontoSurv[,2], marker=fitWeightedToronto$linear.predictors-colMeans(fitWeightedToronto$Z) %*% fitWeightedToronto$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-round(r$AUC, digits = 3)
-
 #' ### Validation cohort
 #' #### Raw
 fitSanger <- CoxRFX(sangerX, sangerSurv, groups=sangerGroups, which.mu=which.mu, nu=nu, sigma0=sigma0)
 waldSanger <- WaldTest(fitSanger)
-#' RDW p-val 9.171138e-03
 survConcordance(sangerSurv ~ fitSanger$linear.predictors)
 
 #' #### Adjusted
 fitWeightedSanger <- CoxRFX(sangerX, sangerSurv, sangerGroups, which.mu=which.mu, sigma0=sigma0, nu=nu, weights=weights[cohort=="Sanger"])
 waldWeightedSanger <- WaldTest(fitWeightedSanger)
-#' RDW p-val 1.233241e-07
 
 survConcordance(sangerSurv ~ fitWeightedSanger$linear.predictors, weights=weights[cohort=="Sanger"])
 
 #' Uno's estimator of cumulative/dynamic AUC
-w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  #get right censored survival data for each individual
-s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  ##Adjust according to dimensions of survival object
+w <- c(which(sangerSurv[,1]==0)[-1]-1, nrow(sangerSurv))  
+s <- Surv(sangerSurv[w,2], sangerSurv[w,3])  
 a <- AUC.uno(s, s, fitWeightedSanger$linear.predictors[w], times= c(0, 22, 0.1))   
 round(a$iauc, digits = 3)
-
-#' Time-dependent ROC AUC 
-r <- survivalROC(Stime = s[,1], status=s[,2], marker=fitWeightedSanger$linear.predictors[w]-colMeans(fitWeightedSanger$Z[w,]) %*% fitWeightedSanger$coefficients, predict.time = 10, method="NNE", span=0.001)  #0.25*nrow(s)^(-0.20))
-round(r$AUC, digits = 3)
 
 #' # Session
 devtools::session_info()
