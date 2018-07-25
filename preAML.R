@@ -53,7 +53,7 @@ superSet <- function(x, s, fill=NA){
 #' available at http://www.cancerresearchuk.org/health-professional/cancer-statistics/statistics-by-cancer-type/leukaemia-aml/incidence. 
 #' Spline function to interpolate
 #' Male denoted by 1 and female by 0
-age_incidence <- read.table("aml_age_incidence.txt", header=TRUE, sep="\t")
+age_incidence <- read.table("data/aml_age_incidence.txt", header=TRUE, sep="\t")
 head(age_incidence)
 tail(age_incidence)
 str(age_incidence)
@@ -65,7 +65,7 @@ aml_inc <- function(gender, x){
 }
 
 #' All cause mortality from the office of national statistics (https://www.ons.gov.uk/).
-all_cause_mortality <- read.table("all_cause_mortality.txt", sep="\t", skip=1, header=TRUE)
+all_cause_mortality <- read.table("data/all_cause_mortality.txt", sep="\t", skip=1, header=TRUE)
 head(all_cause_mortality)
 all_surv <- function(gender, age1, age2){
 	if(gender==1)
@@ -82,7 +82,7 @@ aml_inc_cr <- Vectorize(function(gender, age1, age2) sum(diff(aml_inc(gender, se
 #' # Discovery cohort 
 #' ## Data
 #' 4 (of 95) cases that were sampled within 6 months of AML diagnosis are excluded to avoid skewing model towards significance
-f = "./arch_data/DC_vaf_matrix_414ctrl_91aml.csv"
+f = "data/DC_vaf_matrix_414ctrl_91aml.csv"
 torontoData <- read.csv(f)
 torontoData$gender <- ifelse(torontoData$Sex == "male", 1, 0)  
 torontoData$gender <- as.numeric(torontoData$gender)
@@ -113,7 +113,7 @@ plot(survfit(torontoSurv~ 1))
 
 #' # Validation cohort
 #' ##Data
-f = "./arch_data/VC_vaf_matrix_no_duplicates_262ctrl_29aml.csv"
+f = "data/VC_vaf_matrix_no_duplicates_262ctrl_29aml_nodates.csv"
 sangerData <- read.csv(f)
 colnames(sangerData)
 head(sangerData[, c("Sample", "gender")]) #male=1, female=0
@@ -1240,7 +1240,7 @@ performance(prediction(ImputeMissing(sangerX, as.matrix(torontoImp)) %*% coefFit
 #' ## Discovery cohort 
 #' Data
 #' 83 pre-AML (keeping duplicates with validation cohort)
-f = "./arch_data/DC_vaf_matrix_no_duplicates_414ctrl_83aml.csv"  
+f = "data/DC_vaf_matrix_no_duplicates_414ctrl_83aml.csv"  
 torontoData <- read.csv(f)
 
 torontoData$gender <- ifelse(torontoData$Sex == "male", 1, 
@@ -1280,7 +1280,7 @@ plot(survfit(torontoSurv ~ torontoData$Diagnosis), xlab='Time after first sample
 
 #' ## Validation cohort 
 #' all 37 pre-AML samples including overlap with DC
-f = "./arch_data/VC_vaf_matrix_262ctrl_37aml.csv"
+f = "data/VC_vaf_matrix_262ctrl_37aml_nodates.csv"
 sangerData <- read.csv(f)
 
 sangerData$hcdate <- as.Date(sangerData$hcdate)
@@ -1354,7 +1354,7 @@ dev.off()
 
 
 #'Standardise magnitudes
-#'g <- sangerGroups=="Genes"
+g <- sangerGroups=="Genes"
 sangerX[g] <- sangerX[g] * 10
 names(sangerX)[g] <- paste(names(sangerX[g]),"0.1", sep="_")
 y <- StandardizeMagnitude(sangerX[!g])  
@@ -1437,7 +1437,7 @@ round(a$iauc, digits = 3)
 #' Include only controls with ARCH & all pre-AML (regardless of mutation status)
 #' ## Discovery cohort (Toronto)
 #' Data
-f = "./arch_data/DC_vaf_matrix_no_duplicates_414ctrl_83aml.csv"  
+f = "data/DC_vaf_matrix_no_duplicates_414ctrl_83aml.csv"  
 torontoData <- read.csv(f)
 
 gene_vars <- c("CALR", "NRAS", "DNMT3A", "SF3B1", "IDH1", "KIT", "TET2", "RAD21", "JAK2", "CBL", "KRAS", "PTPN11", "IDH2", "TP53", "NF1", "SRSF2", "CEBPA", "ASXL1", "RUNX1", "U2AF1", "BCOR", "KDM6A", "PHF6", "KMT2C", "KMT2D")
@@ -1479,7 +1479,7 @@ plot(survfit(torontoSurv~ 1), col= "black", main = "DC", xlab='Time after first 
 plot(survfit(torontoSurv ~ torontoData$Diagnosis), xlab='Time after first sample (years)', main = "DC", ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, col = set1[1:2])
 
 #' ## Validation cohort
-f = "./arch_data/VC_vaf_matrix_262ctrl_37aml.csv"
+f = "data/VC_vaf_matrix_262ctrl_37aml_nodates.csv"
 sangerData <- read.csv(f)
 dim(sangerData)
 sangerData <- sangerData[rowSums(sangerData[, colnames(sangerData) %in% gene_vars])>0 | sangerData$Diagnosis == "AML", ]
@@ -1623,7 +1623,7 @@ round(a$iauc, digits = 3)
 #' #CoxPH model excluding all samples without ARCH-PD
 #' ## Discovery cohort 
 #' Data
-f = "./arch_data/DC_vaf_matrix_414ctrl_91aml.csv"  
+f = "data/DC_vaf_matrix_414ctrl_91aml.csv"  
 torontoData <- read.csv(f)
 
 gene_vars <- c("CALR", "NRAS", "DNMT3A", "SF3B1", "IDH1", "KIT", "TET2", "RAD21", "JAK2", "CBL", "KRAS", "PTPN11", "IDH2", "TP53", "NF1", "SRSF2", "CEBPA", "ASXL1", "RUNX1", "U2AF1", "BCOR", "KDM6A", "PHF6", "KMT2C", "KMT2D")
@@ -1665,7 +1665,7 @@ plot(survfit(torontoSurv~ 1), col= "black", main = "DC", xlab='Time after first 
 plot(survfit(torontoSurv ~ torontoData$Diagnosis), xlab='Time after first sample (years)', main = "DC", ylab='AML-free fraction', bty='L', yaxs='i', ylim=c(0,1.01), mark.time = T, col = set1[1:2])
 
 #' ## Validation cohort
-f = "./arch_data/VC_vaf_matrix_no_duplicates_262ctrl_29aml.csv"
+f = "data/VC_vaf_matrix_no_duplicates_262ctrl_29aml_nodates.csv"
 sangerData <- read.csv(f)
 dim(sangerData)
 sangerData <- sangerData[rowSums(sangerData[, colnames(sangerData) %in% gene_vars])>0, ]
@@ -1805,4 +1805,4 @@ round(a$iauc, digits = 3)
 #' # Session
 devtools::session_info()
 
-#' This code and all data necessary to execute it is availalbe from http://www.github.com/gerstung-lab/
+#' This code and all data necessary to execute it is available from http://www.github.com/gerstung-lab/
